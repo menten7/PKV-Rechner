@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>PKV-Beitragsvergleich + GKV-Vergleich</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- React 18 UMD + Babel -->
+  <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <!-- jsPDF + html2canvas -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+  <style>
+    body { background: #f8fafc; }
+    .card { background: #fff; border-radius: 1rem; box-shadow: 0 1px 6px rgba(0,0,0,.06); padding: 1rem; }
+    .row { display:flex; align-items: baseline; justify-content: space-between; font-size: .95rem; }
+    .row.big{ font-size: 1.05rem; }
+    .row strong { font-weight: 600; }
+    .divider { height:1px; background:#e2e8f0; margin:.25rem 0; }
+    .btn { display:inline-flex; align-items:center; gap:.5rem; border-radius: 1rem; border:1px solid #e2e8f0; padding:.5rem .75rem; background:#fff; }
+    input[type=number]{ width:100%; outline:none; }
+    .label{ color:#334155; font-size:.9rem; }
+    .help{ color:#64748b; font-size:.75rem; }
+    .grid-3{ display:grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap:.75rem; }
+    .grid-2{ display:grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap:.75rem; }
+    .pill { padding: .25rem .5rem; border-radius: 999px; font-weight:600; }
+  </style>
+</head>
+<body class="text-slate-900">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useMemo } = React;
+    const pct = x => x / 100;
+    const clamp2 = x => Math.round((x + Number.EPSILON) * 100) / 100;
+
+    // 2026 Konstanten – bitte jährlich prüfen/aktualisieren
+    const BBG_MO = 5812.50;             // Monatliche BBG KV/PV 2026
+    const GKV_RATE = 14.6;              // Allgemeiner GKV-Satz in %
+    const PV_TOTAL = 3.4;               // Pflegeversicherung gesamt in % (AN+AG) – Bund/Sachsen Aufteilung beachten
+    const PV_CHILDLESS_SURCHARGE = 0.6; // Kinderlos-Zuschlag AN in %
+
+    function NumberInput({label, value, onChange, suffix}){
+      return (
+        <label className="grid gap-1 text-sm">
+          <span className="label">{label}</span>
+          <div className="flex items-center rounded-xl border bg-white px-3 py-2 shadow-sm focus-within:ring-2 focus-within:ring-slate-300">
+            <input type="number" value={Number.isFinite(value)?value:0} min={0} step="1"
+              onChange={e=>onChange(parseFloat(e.target.value || "0"))} className="pr-2"/>
+            {suffix ? <span className="text-slate-500 text-xs">{suffix}</span> : null}
+          </div>
+        </label>
+      );
+    }
+
+    function Row({label, value, strong, big}){
+      return (
+        <div className={"row " + (big? "big": "")}>
+          <span className="text-slate-600">{label}</span>
+          <span className={strong? "font-semibold": ""}>{(value||0).toLocaleString(undefined,{minimumFractionDigits:2, maximumFractionDigits:2})} €</span>
+        </div>
+      );
+    }
+
+    async function exportPDF(selector){
+      const el = document.querySelector(selector);
+      if(!el) return;
+      const canvas = await html2canvas(el, {scale:2, backgroundColor:"#ffffff"});
+      const { jsPDF } = window.jspdf;
+      const pdf = new jsPDF({orientation:"p", unit:"pt", format:"a4"});
+      const pageWidth = pdf.internal.pageSize.getWidth();
+      const pageHeight = pdf.internal.pageSize.getHeight();
+      const imgWidth = pageWidth - 60;
+      const imgHeight = canvas.height * (imgWidth / canvas.width);
+      let y = 40;
+      pdf.setFontSize(14);
+      pdf.text("PKV-Beitragsvergleich – Ergebnis", 40, y);
+      y += 10;
+      pdf.setLineWidth(0.5);
+      pdf.line(40, y, pageWidth-40, y);
+      y += 20;
+      if (imgHeight < pageHeight - y - 40) {
+        pdf.addImage(canvas.toDataURL("image/png"), "PNG", 30, y, imgWidth, imgHeight);
+      } else {
+        let sY = 0;
+        const pageImgHeight = pageHeight - y - 40;
+        while (sY < canvas.height) {
+          const slice = document.createElement("canvas");
+          slice.width = canvas.width;
+          const sliceHeight = Math.min(pageImgHeight * (canvas.width / imgWidth), canvas.height - sY);
+          slice.height = sliceHeight;
+          const ctx = slice.getContext("2d");
+          ctx.drawImage(canvas, 0, sY, canvas.width, sliceHeight, 0, 0, canvas.width, sliceHeight);
+          pdf.addImage(slice.toDataURL("image/png"), "PNG", 30, y, imgWidth, (sliceHeight * imgWidth) / canvas.width);
+          sY += sliceHeight;
+          if (sY < canvas.height) { pdf.addPage(); y = 40; }
+        }
+      }
+      pdf.save("pkv-beitragsvergleich.pdf");
+    }
+
+    function App(){
+      // Beiträge Eigen (Monat)
+      const [kv, setKv] = useState(0);
+      const [kt, setKt] = useState(0);
+      const [pv, setPv] = useState(0);
+      const [ark, setArk] = useState(0);
+      const [pzt, setPzt] = useState(0);
+
+      // Kinder (nur KV/PV)
+      const [kids, setKids] = useState([]); // {kv, pv, id}
+
+      // AGZ (2026 Presets) + Sachsen Umschalter
+      const [agzPercentKV, setAgzPercentKV] = useState(50);
+      const [agzPercentKT, setAgzPercentKT] = useState(50);
+      const [agzCapKV, setAgzCapKV] = useState(496.97);
+      const [agzPercentPV, setAgzPercentPV] = useState(50);
+      const [agzCapPV, setAgzCapPV] = useState(104.63);
+      const [isSachsen, setIsSachsen] = useState(false); // Sachsen: 75,56 €
+
+      // Steuer / Jahreswerte
+      const [mtr, setMtr] = useState(30);
+      const [sbYear, setSbYear] = useState(0);
+      const [breYear, setBreYear] = useState(0);
+      const [includeKidsPV, setIncludeKidsPV] = useState(true);
+
+      // GKV: Zusatzbeitrag (%) + kinderlos
+      const [gkvZusatz, setGkvZusatz] = useState(2.5); // kassenindividuell
+      const [isKinderlos, setIsKinderlos] = useState(false);
+
+      const sbMonthly = clamp2((sbYear||0)/12);
+      const breMonthly = clamp2((breYear||0)/12);
+
+      // PKV Bruttosumme (ohne SB/BRE)
+      const fullGrossPremium = useMemo(()=>{
+        const kidsSum = kids.reduce((a,k)=>a+(k.kv||0)+(k.pv||0),0);
+        return clamp2((kv||0)+(kt||0)+(pv||0)+(ark||0)+(pzt||0)+kidsSum);
+      }, [kv,kt,pv,ark,pzt,kids]);
+
+      // AGZ Hauptperson KV+KT gemeinsam gegen KV-Cap
+      const agzKV_main = useMemo(()=>{
+        const rawKV = (kv||0)* (agzPercentKV/100);
+        const rawKT = (kt||0)* (agzPercentKT/100);
+        const total = rawKV + rawKT;
+        return clamp2(agzCapKV>0 ? Math.min(total, agzCapKV) : total);
+      }, [kv,kt,agzPercentKV,agzPercentKT,agzCapKV]);
+
+      // Aufschlüsselung: erst KV bedienen, Rest für KT
+      const agzBreakdownKV_main = useMemo(()=>{
+        const prefKV = (kv||0)* (agzPercentKV/100);
+        const prefKT = (kt||0)* (agzPercentKT/100);
+        const cap = agzCapKV>0 ? agzCapKV : Number.POSITIVE_INFINITY;
+        const grantKV = Math.min(prefKV, cap);
+        const remaining = Math.max(cap - grantKV, 0);
+        const grantKT = Math.min(prefKT, remaining);
+        return { grantKV: clamp2(grantKV), grantKT: clamp2(grantKT) };
+      }, [kv,kt,agzPercentKV,agzPercentKT,agzCapKV]);
+
+      // AGZ PV Hauptperson
+      const agzPV_main = useMemo(()=>{
+        const raw = (pv||0)* (agzPercentPV/100);
+        const capPV = isSachsen ? 75.56 : agzCapPV;
+        return clamp2(capPV>0 ? Math.min(raw, capPV) : raw);
+      }, [pv, agzPercentPV, agzCapPV, isSachsen]);
+
+      // Rest-Caps für Kinder
+      const remKVCapStart = Math.max((agzCapKV||0) - agzKV_main, 0);
+      const remPVCapStart = Math.max(((isSachsen?75.56:agzCapPV)||0) - agzPV_main, 0);
+
+      // AGZ Kinder
+      const {agzKV_kids, agzPV_kids, ownKV_kids_clean, ownPV_kids_clean} = useMemo(()=>{
+        let remKV = remKVCapStart;
+        let remPV = remPVCapStart;
+        let kvSum = 0, pvSum = 0;
+        let ownKVKids = 0, ownPVKids = 0;
+        for(const k of kids){
+          if(remKV>0 && (k.kv||0)>0){
+            const maxKidKV = (k.kv||0)*0.5;
+            const grant = Math.min(maxKidKV, remKV);
+            kvSum += grant; remKV -= grant;
+            ownKVKids += Math.max((k.kv||0) - grant, 0);
+          } else {
+            ownKVKids += (k.kv||0);
+          }
+          if(remPV>0 && (k.pv||0)>0){
+            const maxKidPV = (k.pv||0)*0.5;
+            const grant = Math.min(maxKidPV, remPV);
+            pvSum += grant; remPV -= grant;
+            ownPVKids += Math.max((k.pv||0) - grant, 0);
+          } else {
+            ownPVKids += (k.pv||0);
+          }
+        }
+        return {
+          agzKV_kids: clamp2(kvSum),
+          agzPV_kids: clamp2(pvSum),
+          ownKV_kids_clean: clamp2(ownKVKids),
+          ownPV_kids_clean: clamp2(ownPVKids)
+        };
+      }, [kids, remKVCapStart, remPVCapStart]);
+
+      const agzKV_total = clamp2(agzKV_main + agzKV_kids);
+      const agzPV_total = clamp2(agzPV_main + agzPV_kids);
+      const agzTotal = clamp2(agzKV_total + agzPV_total);
+
+      // PKV-Eigenanteile
+      const ownKV_main = clamp2(Math.max((kv||0) - agzBreakdownKV_main.grantKV, 0));
+      const ownKT = clamp2(Math.max((kt||0) - agzBreakdownKV_main.grantKT, 0));
+      const ownPV_main = clamp2(Math.max((pv||0) - agzPV_main, 0));
+      const ownARK = clamp2(ark||0);
+      const ownPZT = clamp2(pzt||0);
+      const ownKV_total = clamp2(ownKV_main + ownKV_kids_clean);
+      const ownPV_total = clamp2(ownPV_main + ownPV_kids_clean);
+
+      // PKV Summen
+      const regularAfterAGZ = clamp2(ownKV_total + ownPV_total + ownKT + ownARK + ownPZT); // ohne SB/BRE
+      const cashOutBeforeTax = clamp2(regularAfterAGZ + sbMonthly - breMonthly);
+
+      // PKV Steuer (Update: Kinder-KV 80% absetzbar)
+      const deductibleBaseRaw = clamp2(
+        (ownKV_main * 0.8) +
+        (ownKV_kids_clean * 0.8) +
+        ownPV_main +
+        (includeKidsPV ? ownPV_kids_clean : 0)
+      );
+      const deductibleBase = clamp2(Math.max(deductibleBaseRaw - breMonthly, 0));
+      const taxSaving = clamp2(deductibleBase * (mtr/100));
+      const effectiveAfterTax = clamp2(cashOutBeforeTax - taxSaving);
+
+      // GKV-Berechnung (Höchstbeitrag; Angestellte)
+      const gkvAN_KV = useMemo(()=>{
+        const rate = (GKV_RATE + (gkvZusatz||0)) / 2; // AN-Anteil
+        return clamp2(BBG_MO * (rate/100));
+      }, [gkvZusatz]);
+
+      const gkvAN_PV = useMemo(()=>{
+        const baseAN = isSachsen ? 2.2 : 1.7;
+        const add = (isKinderlos ? 0.6 : 0);
+        return clamp2(BBG_MO * ((baseAN + add)/100));
+      }, [isSachsen, isKinderlos]);
+
+      const gkvAN_total = clamp2(gkvAN_KV + gkvAN_PV);
+
+      // GKV Steuer
+      const gkv_taxSaving = clamp2(gkvAN_total * (mtr/100));
+      const gkv_afterTax = clamp2(gkvAN_total - gkv_taxSaving);
+
+      // Vergleich & Farblogik (Ersparnis der PKV = GKV_netto - PKV_netto)
+      const pkv_saving_vs_gkv = clamp2(gkv_afterTax - effectiveAfterTax);
+      const savingPositive = pkv_saving_vs_gkv > 0; // grün wenn PKV günstiger
+
+      function addKid(){ setKids(x => [...x, {kv:0, pv:0, id: Math.random().toString(36).slice(2)}]); }
+      function removeKid(id){ setKids(x => x.filter(k => k.id !== id)); }
+
+      function reset(){
+        setKv(0); setKt(0); setPv(0); setArk(0); setPzt(0);
+        setKids([]);
+        setAgzPercentKV(50); setAgzPercentKT(50); setAgzCapKV(496.97);
+        setAgzPercentPV(50); setAgzCapPV(104.63); setIsSachsen(false);
+        setMtr(30); setSbYear(0); setBreYear(0); setIncludeKidsPV(true);
+        setGkvZusatz(2.5); setIsKinderlos(false);
+      }
+
+      return (
+        <div className="min-h-screen p-6">
+          <div className="max-w-6xl mx-auto grid gap-6">
+            <header className="flex items-center justify-between">
+              <div>
+                <h1 className="text-2xl md:text-3xl font-semibold tracking-tight">PKV-Beitragsvergleich + GKV-Vergleich</h1>
+                <p className="text-sm text-slate-600 mt-1">PKV (AGZ/Steuer/SB/BRE) vs. GKV-Höchstbeitrag (Zusatzbeitrag & Kinderlos, Bund/Sachsen).</p>
+              </div>
+              <div className="flex gap-2">
+                <button className="btn" onClick={()=>exportPDF('#results')}>PDF Export</button>
+                <button className="btn" onClick={reset}>Reset</button>
+              </div>
+            </header>
+
+            <div className="grid md:grid-cols-2 gap-6">
+              <div className="card">
+                <h2 className="text-lg font-semibold mb-2">Eigene Beiträge (€/Monat)</h2>
+                <div className="grid gap-3">
+                  <NumberInput label="Krankenversicherung (KV, ohne KT)" value={kv} onChange={setKv} suffix="€"/>
+                  <NumberInput label="Krankentagegeld (KT) – nicht absetzbar" value={kt} onChange={setKt} suffix="€"/>
+                  <NumberInput label="Pflegepflicht (PV)" value={pv} onChange={setPv} suffix="€"/>
+                  <NumberInput label="Auslandsreisekranken (ARK) – nicht absetzbar" value={ark} onChange={setArk} suffix="€"/>
+                  <NumberInput label="Pflegezusatz / Pflegetagegeld (PZT) – nicht absetzbar" value={pzt} onChange={setPzt} suffix="€"/>
+                </div>
+              </div>
+
+              <div className="card">
+                <h2 className="text-lg font-semibold mb-2">Arbeitgeberzuschuss (AGZ)</h2>
+                <div className="grid gap-3">
+                  <div className="grid-3">
+                    <NumberInput label="AGZ % KV (typ. 50%)" value={agzPercentKV} onChange={setAgzPercentKV} suffix="%"/>
+                    <NumberInput label="AGZ-Cap KV/Monat (2026)" value={agzCapKV} onChange={setAgzCapKV} suffix="€"/>
+                    <div className="help">KV-Cap gilt auch für KT (gemeinsamer Topf).</div>
+                  </div>
+                  <div className="grid-3">
+                    <NumberInput label="AGZ % KT (typ. 50%)" value={agzPercentKT} onChange={setAgzPercentKT} suffix="%"/>
+                    <div></div>
+                    <div className="help">KT ist förderfähig, aber nicht steuerlich absetzbar.</div>
+                  </div>
+                  <div className="grid-3">
+                    <NumberInput label="AGZ % PV (typ. 50%)" value={agzPercentPV} onChange={setAgzPercentPV} suffix="%"/>
+                    <NumberInput label={`AGZ-Cap PV/Monat ${isSachsen? '(Sachsen)': '(2026 Bund)'}`} value={isSachsen? 75.56 : agzCapPV} onChange={setAgzCapPV} suffix="€"/>
+                    <label className="flex items-center gap-2 text-xs text-slate-600 mt-6">
+                      <input type="checkbox" checked={isSachsen} onChange={e=>setIsSachsen(e.target.checked)}/> Sachsen
+                    </label>
+                  </div>
+                  <div className="help">Kinder ziehen Zuschüsse aus den Rest-Caps (max. 50 % je Kinderbeitrag).</div>
+                </div>
+              </div>
+            </div>
+
+            <div className="card">
+              <h2 className="text-lg font-semibold mb-2">Kinder (optional)</h2>
+              <div className="grid gap-3">
+                {kids.map((k, i)=>(
+                  <div key={k.id} className="grid grid-cols-12 gap-2 items-end">
+                    <div className="col-span-5"><NumberInput label={`Kind ${i+1} – KV`} value={k.kv} onChange={v=>setKids(x=>x.map(o=>o.id===k.id? {...o, kv:v}: o))} suffix="€"/></div>
+                    <div className="col-span-5"><NumberInput label={`Kind ${i+1} – PV`} value={k.pv} onChange={v=>setKids(x=>x.map(o=>o.id===k.id? {...o, pv:v}: o))} suffix="€"/></div>
+                    <div className="col-span-2 flex justify-end pb-2">
+                      <button className="btn" onClick={()=>removeKid(k.id)}>Entfernen</button>
+                    </div>
+                  </div>
+                ))}
+                <button className="btn w-fit" onClick={()=>setKids(x=>[...x,{kv:0,pv:0,id:Math.random().toString(36).slice(2)}])}>Kind hinzufügen</button>
+                <div className="help">Kinder haben i. d. R. kein KT; Pflege: Hauptpflegebeitrag.</div>
+              </div>
+            </div>
+
+            <div className="grid md:grid-cols-2 gap-6">
+              <div className="card">
+                <h2 className="text-lg font-semibold mb-2">Steuer & Jahreswerte</h2>
+                <div className="grid gap-3">
+                  <NumberInput label="Grenzsteuersatz (MTR)" value={mtr} onChange={setMtr} suffix="%"/>
+                  <NumberInput label="Selbstbeteiligung (jährlich, netto)" value={sbYear} onChange={setSbYear} suffix="€"/>
+                  <NumberInput label="Beitragsrückerstattung (jährlich)" value={breYear} onChange={setBreYear} suffix="€"/>
+                  <label className="flex items-center gap-2 text-xs text-slate-600">
+                    <input type="checkbox" checked={includeKidsPV} onChange={e=>setIncludeKidsPV(e.target.checked)}/> Kinder-PV in Steuerbasis berücksichtigen
+                  </label>
+                  <div className="help">BRE mindert die Steuerbasis und reduziert die monatliche Belastung.</div>
+                </div>
+              </div>
+
+              <div className="card">
+                <h2 className="text-lg font-semibold mb-2">GKV – Höchstbeitrag (Angestellte)</h2>
+                <div className="grid gap-3">
+                  <NumberInput label="Zusatzbeitrag deiner Kasse" value={gkvZusatz} onChange={setGkvZusatz} suffix="%"/>
+                  <label className="flex items-center gap-2 text-sm">
+                    <input type="checkbox" checked={isKinderlos} onChange={e=>setIsKinderlos(e.target.checked)}/> Kinderlos (PV-Zuschlag AN)
+                  </label>
+                  <div className="help">Berechnung mit BBG 2026 (5.812,50 €). KV: (14,6% + Zusatz)/2. PV-AN: Bund 1,7% | Sachsen 2,2% + Kinderlos 0,6%.</div>
+                </div>
+              </div>
+            </div>
+
+            <div className="card" id="results">
+              <div className="grid md:grid-cols-2 gap-6">
+                <div>
+                  <h3 className="font-semibold mb-2">PKV – Netto (nach Steuer)</h3>
+                  <div className="grid gap-2 text-sm">
+                    <Row label="Voller Beitrag (ohne AGZ, ohne SB/BRE)" value={fullGrossPremium}/>
+                    <div className="divider"></div>
+                    <Row label="AG-Zuschuss KV (Haupt, inkl. KT)" value={agzKV_main}/>
+                    <Row label="└─ davon KV" value={agzBreakdownKV_main.grantKV}/>
+                    <Row label="└─ davon KT" value={agzBreakdownKV_main.grantKT}/>
+                    <Row label="AG-Zuschuss KV (Kinder)" value={agzKV_kids}/>
+                    <Row label="AG-Zuschuss PV (Haupt)" value={agzPV_main}/>
+                    <Row label="AG-Zuschuss PV (Kinder)" value={agzPV_kids}/>
+                    <Row label="AG-Zuschuss gesamt" value={agzTotal} strong/>
+                    <div className="divider"></div>
+                    <Row label="Regulärer Beitrag nach AGZ (ohne SB/BRE)" value={regularAfterAGZ} strong/>
+                    <Row label="+ Selbstbeteiligung/Monat" value={sbMonthly}/>
+                    <Row label="- Beitragsrückerstattung/Monat" value={breMonthly}/>
+                    <Row label="Eigenanteil vor Steuer (inkl. SB/BRE)" value={cashOutBeforeTax}/>
+                    <Row label="Steuerlich absetzbare Basis" value={deductibleBase}/>
+                    <Row label="Steuerersparnis (geschätzt)" value={taxSaving}/>
+                    <div className="divider"></div>
+                    <Row label="PKV – Effektiv nach Steuern" value={effectiveAfterTax} big strong/>
+                  </div>
+                </div>
+
+                <div>
+                  <h3 className="font-semibold mb-2">GKV – Netto (AN-Anteil nach Steuer)</h3>
+                  <div className="grid gap-2 text-sm">
+                    <Row label="KV (AN) bei Höchstbeitrag" value={gkvAN_KV}/>
+                    <Row label={`PV (AN) ${isSachsen? '(Sachsen)': '(Bund)'} ${isKinderlos? '+ kinderlos':''}`} value={gkvAN_PV}/>
+                    <Row label="GKV – AN-Beitrag gesamt (brutto)" value={gkvAN_total} strong/>
+                    <Row label="Steuerersparnis (geschätzt)" value={gkv_taxSaving}/>
+                    <div className="divider"></div>
+                    <Row label="GKV – Netto (nach Steuern)" value={gkv_afterTax} big strong/>
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-4 p-3 rounded-xl border flex items-center justify-between">
+                <div>
+                  <div className="text-sm text-slate-600">Beitragsunterschied (GKV Netto – PKV Netto)</div>
+                  <div className="text-xl font-semibold">
+                    {( (gkv_afterTax - effectiveAfterTax) ).toLocaleString(undefined,{minimumFractionDigits:2, maximumFractionDigits:2})} €
+                  </div>
+                </div>
+                <div className={"pill " + ( (gkv_afterTax - effectiveAfterTax) > 0 ? "bg-green-100 text-green-700 border border-green-200" : "bg-red-100 text-red-700 border border-red-200") }>
+                  { (gkv_afterTax - effectiveAfterTax) > 0 ? "PKV spart gegenüber GKV" : "GKV günstiger als PKV" }
+                </div>
+              </div>
+            </div>
+
+            <div className="text-xs text-slate-600">
+              <p>⚠️ Vereinfachtes Modell. Keine Steuer-/Rechtsberatung. Caps/Jahreswerte und Beitragssätze jährlich prüfen.</p>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App/>);
+  </script>
+</body>
+</html>
