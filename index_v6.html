@@ -1,0 +1,534 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>PKV Multi-Szenario · GKV-Vergleich (v6)</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script>
+    Babel.registerPreset('env', Babel.availablePresets['env']);
+    Babel.registerPreset('react', Babel.availablePresets['react']);
+  </script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+  <style>
+    :root{ --brand:#fdc40b; }
+    body { background: #f8fafc; }
+    .card { background: #fff; border-radius: 1rem; box-shadow: 0 1px 6px rgba(0,0,0,.06); padding: 1rem; }
+    .row { display:flex; align-items: baseline; justify-content: space-between; font-size: .95rem; }
+    .row.big{ font-size: 1.05rem; }
+    .divider { height:1px; background:#e2e8f0; margin:.25rem 0; }
+    .btn { display:inline-flex; align-items:center; gap:.5rem; border-radius: 999px; border:1px solid #e2e8f0; padding:.5rem .85rem; background:#fff; transition: all .15s; }
+    .btn:hover{ background:#f1f5f9; }
+    .btn-primary { background: var(--brand); border-color: rgba(0,0,0,.05); color:#1f2937; font-weight:600; }
+    input[type=number], input[type=text]{ width:100%; outline:none; }
+    .label{ color:#334155; font-size:.9rem; }
+    .help{ color:#64748b; font-size:.75rem; }
+    .grid-3{ display:grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap:.75rem; }
+    .pill { padding: .25rem .6rem; border-radius: 999px; font-weight:600; }
+    .header { background:white; border-radius:1rem; padding: .75rem 1rem; box-shadow: 0 1px 6px rgba(0,0,0,.06); }
+    .logo { height:40px; width:auto; object-fit:contain; }
+    .brandname { font-weight:700; letter-spacing:.2px; }
+    .scenario-card { border:1px solid #e2e8f0; border-radius: .9rem; padding: .75rem; }
+    .scenario-actions button{ font-size:.8rem; }
+    table{ width:100%; border-collapse: collapse; }
+    th, td{ padding:.5rem .5rem; border-bottom:1px solid #e2e8f0; text-align:right; }
+    th:first-child, td:first-child{ text-align:left; }
+  </style>
+</head>
+<body class="text-slate-900">
+  <div id="root"></div>
+
+  <script type="text/babel" data-presets="env,react">
+    const { useState, useMemo, useEffect } = React;
+    const clamp2 = x => Math.round((x + Number.EPSILON) * 100) / 100;
+    const currency = x => (x||0).toLocaleString(undefined,{minimumFractionDigits:2, maximumFractionDigits:2})+" €";
+
+    // 2026 Konstanten
+    const BBG_MO = 5812.50;
+    const GKV_RATE = 14.6;
+    const PV_CHILDLESS_SURCHARGE = 0.6;
+
+    function NumberInput({label, value, onChange, suffix, type="number"}){
+      return (
+        <label className="grid gap-1 text-sm">
+          <span className="label">{label}</span>
+          <div className="flex items-center rounded-xl border bg-white px-3 py-2 shadow-sm focus-within:ring-2 focus-within:ring-slate-300">
+            <input type={type} value={type==="number" ? (Number.isFinite(value)?value:0) : (value||"")} min={0} step="1"
+              onChange={e=>onChange(type==="number"? parseFloat(e.target.value || "0") : e.target.value)} className="pr-2"/>
+            {suffix ? <span className="text-slate-500 text-xs">{suffix}</span> : null}
+          </div>
+        </label>
+      );
+    }
+
+    function Row({label, value, strong, big}){
+      return (
+        <div className={"row " + (big? "big": "")}>
+          <span className="text-slate-600">{label}</span>
+          <span className={strong? "font-semibold": ""}>{currency(value)}</span>
+        </div>
+      );
+    }
+
+    async function exportPDF(selector){
+      const el = document.querySelector(selector);
+      if(!el) return;
+      const canvas = await html2canvas(el, {scale:2, backgroundColor:"#ffffff", useCORS:true});
+      const { jsPDF } = window.jspdf;
+      const pdf = new jsPDF({orientation:"p", unit:"pt", format:"a4"});
+      const pageWidth = pdf.internal.pageSize.getWidth();
+      const imgWidth = pageWidth - 60;
+      const imgHeight = canvas.height * (imgWidth / canvas.width);
+      let y = 40;
+      pdf.setFontSize(14);
+      pdf.text("PKV Multi-Szenario – Ergebnisse", 40, y);
+      y += 10;
+      pdf.setLineWidth(0.5);
+      pdf.line(40, y, pageWidth-40, y);
+      y += 20;
+      pdf.addImage(canvas.toDataURL("image/png"), "PNG", 30, y, imgWidth, imgHeight);
+      pdf.save("pkv-multiszenerio.pdf");
+    }
+
+    function calcPKVScenario({
+      kv, kt, pv, ark, pzt, kids,
+      agzPercentKV, agzPercentKT, agzCapKV,
+      agzPercentPV, agzCapPV, isSachsen,
+      mtr, sbYear, breYear, includeKidsPV
+    }){
+      const sbMonthly = clamp2((sbYear||0)/12);
+      const breMonthly = clamp2((breYear||0)/12);
+
+      const prefKV = (kv||0) * (agzPercentKV/100);
+      const prefKT = (kt||0) * (agzPercentKT/100);
+      const capKV = agzCapKV>0 ? agzCapKV : Number.POSITIVE_INFINITY;
+      const grantKV = Math.min(prefKV, capKV);
+      const remKVCap = Math.max(capKV - grantKV, 0);
+      const grantKT = Math.min(prefKT, remKVCap);
+      const agzKV_main = clamp2(grantKV + grantKT);
+
+      const capPV = isSachsen ? 75.56 : (agzCapPV||0);
+      const prefPV = (pv||0) * (agzPercentPV/100);
+      const agzPV_main = clamp2(capPV>0 ? Math.min(prefPV, capPV) : prefPV);
+
+      let remKV = Math.max((agzCapKV||0) - agzKV_main, 0);
+      let remPV = Math.max((capPV||0) - agzPV_main, 0);
+      let agzKV_kids = 0, agzPV_kids = 0;
+      let ownKV_kids_clean = 0, ownPV_kids_clean = 0;
+      for(const k of kids||[]){
+        if(remKV>0 && (k.kv||0)>0){
+          const maxKidKV = (k.kv||0)*0.5;
+          const grant = Math.min(maxKidKV, remKV);
+          agzKV_kids += grant; remKV -= grant;
+          ownKV_kids_clean += Math.max((k.kv||0) - grant, 0);
+        } else {
+          ownKV_kids_clean += (k.kv||0);
+        }
+        if(remPV>0 && (k.pv||0)>0){
+          const maxKidPV = (k.pv||0)*0.5;
+          const grant = Math.min(maxKidPV, remPV);
+          agzPV_kids += grant; remPV -= grant;
+          ownPV_kids_clean += Math.max((k.pv||0) - grant, 0);
+        } else {
+          ownPV_kids_clean += (k.pv||0);
+        }
+      }
+      agzKV_kids = clamp2(agzKV_kids);
+      agzPV_kids = clamp2(agzPV_kids);
+
+      const agzTotal = clamp2(agzKV_main + agzKV_kids + agzPV_main + agzPV_kids);
+
+      const ownKV_main = clamp2(Math.max((kv||0) - grantKV, 0));
+      const ownKT = clamp2(Math.max((kt||0) - grantKT, 0));
+      const ownPV_main = clamp2(Math.max((pv||0) - agzPV_main, 0));
+      const ownARK = clamp2(ark||0);
+      const ownPZT = clamp2(pzt||0);
+      const ownKV_total = clamp2(ownKV_main + ownKV_kids_clean);
+      const ownPV_total = clamp2(ownPV_main + ownPV_kids_clean);
+
+      const regularAfterAGZ = clamp2(ownKV_total + ownPV_total + ownKT + ownARK + ownPZT);
+      const cashOutBeforeTax = clamp2(regularAfterAGZ + sbMonthly - breMonthly);
+
+      const deductibleBaseRaw = clamp2(
+        (ownKV_main * 0.8) +
+        (ownKV_kids_clean * 0.8) +
+        ownPV_main +
+        (includeKidsPV ? ownPV_kids_clean : 0)
+      );
+      const deductibleBase = clamp2(Math.max(deductibleBaseRaw - breMonthly, 0));
+      const taxSaving = clamp2(deductibleBase * (mtr/100));
+      const effectiveAfterTax = clamp2(cashOutBeforeTax - taxSaving);
+
+      const kidsSum = (kids||[]).reduce((a,k)=>a+(k.kv||0)+(k.pv||0),0);
+      const fullGrossPremium = clamp2((kv||0)+(kt||0)+(pv||0)+(ark||0)+(pzt||0)+kidsSum);
+
+      return {
+        fullGrossPremium, agzKV_main, grantKV: clamp2(grantKV), grantKT: clamp2(grantKT),
+        agzKV_kids, agzPV_main, agzPV_kids, agzTotal,
+        regularAfterAGZ, cashOutBeforeTax, deductibleBase, taxSaving, effectiveAfterTax,
+        ownKV_total, ownPV_total, ownKT, ownARK, ownPZT,
+        ownKV_main, ownPV_main,
+        ownKV_kids_clean, ownPV_kids_clean
+      };
+    }
+
+    function App(){
+      // Branding
+      const [brandName, setBrandName] = useState("Deine Marke");
+      const [logoUrl, setLogoUrl] = useState("");
+      useEffect(()=>{
+        const saved = localStorage.getItem("pkv_branding");
+        if(saved){ try{ const j = JSON.parse(saved); setBrandName(j.brandName||"Deine Marke"); setLogoUrl(j.logoUrl||""); }catch(e){} }
+      },[]);
+      useEffect(()=>{
+        localStorage.setItem("pkv_branding", JSON.stringify({brandName, logoUrl}));
+      }, [brandName, logoUrl]);
+
+      // Global: AGZ + Steuer + GKV
+      const [agzPercentKV, setAgzPercentKV] = useState(50);
+      const [agzPercentKT, setAgzPercentKT] = useState(50);
+      const [agzCapKV, setAgzCapKV] = useState(496.97);
+      const [agzPercentPV, setAgzPercentPV] = useState(50);
+      const [agzCapPV, setAgzCapPV] = useState(104.63);
+      const [isSachsen, setIsSachsen] = useState(false);
+
+      const [mtr, setMTR] = useState(30);
+      const [sbYear, setSBYear] = useState(0);
+      const [breYear, setBREYear] = useState(0);
+      const [includeKidsPV, setIncludeKidsPV] = useState(true);
+
+      const [gkvZusatz, setGkvZusatz] = useState(2.5);
+      const [isKinderlos, setIsKinderlos] = useState(false);
+
+      // GKV baseline
+      const gkvAN_KV = useMemo(()=>{
+        const rate = (GKV_RATE + (gkvZusatz||0)) / 2;
+        return clamp2(BBG_MO * (rate/100));
+      }, [gkvZusatz]);
+      const gkvAN_PV = useMemo(()=>{
+        const baseAN = isSachsen ? 2.2 : 1.7;
+        const add = (isKinderlos ? PV_CHILDLESS_SURCHARGE : 0);
+        return clamp2(BBG_MO * ((baseAN + add)/100));
+      }, [isSachsen, isKinderlos]);
+      const gkvAN_total = clamp2(gkvAN_KV + gkvAN_PV);
+      const gkv_taxSaving = clamp2(gkvAN_total * (mtr/100));
+      const gkv_afterTax = clamp2(gkvAN_total - gkv_taxSaving);
+
+      // Scenarios
+      const emptyScenario = (name="Szenario A") => ({
+        id: Math.random().toString(36).slice(2),
+        name,
+        kv:0, kt:0, pv:0, ark:0, pzt:0,
+        kids:[]
+      });
+      const [scenarios, setScenarios] = useState([emptyScenario("Szenario A")]);
+      const [selectedId, setSelectedId] = useState(null);
+
+      useEffect(()=>{
+        if(!selectedId && scenarios.length>0) setSelectedId(scenarios[0].id);
+        if(selectedId && !scenarios.some(s=>s.id===selectedId) && scenarios.length>0){
+          setSelectedId(scenarios[0].id);
+        }
+      }, [scenarios, selectedId]);
+
+      function addScenario(){
+        const idx = scenarios.length;
+        const newSc = emptyScenario(`Szenario ${String.fromCharCode(65+idx)}`);
+        setScenarios(s => [...s, newSc]);
+        setSelectedId(newSc.id);
+      }
+      function duplicateScenario(id){
+        setScenarios(s => {
+          const i = s.findIndex(x=>x.id===id);
+          if(i<0) return s;
+          const copy = JSON.parse(JSON.stringify(s[i]));
+          copy.id = Math.random().toString(36).slice(2);
+          copy.name = s[i].name + " (Kopie)";
+          return [...s, copy];
+        });
+      }
+      function removeScenario(id){
+        setScenarios(s => s.length<=1 ? s : s.filter(x=>x.id!==id));
+      }
+      function updateScenario(id, patch){
+        setScenarios(s => s.map(x => x.id===id ? {...x, ...patch} : x));
+      }
+      function addKidToScenario(id){
+        setScenarios(s => s.map(x => x.id===id ? {...x, kids:[...x.kids, {kv:0, pv:0, id: Math.random().toString(36).slice(2)}]} : x));
+      }
+      function removeKidFromScenario(id, kidId){
+        setScenarios(s => s.map(x => x.id===id ? {...x, kids: x.kids.filter(k=>k.id!==kidId)} : x));
+      }
+      function setKidValue(id, kidId, field, val){
+        setScenarios(s => s.map(x => {
+          if(x.id!==id) return x;
+          return {...x, kids: x.kids.map(k=>k.id===kidId? {...k, [field]:val} : k)};
+        }));
+      }
+
+      const results = useMemo(()=>{
+        return scenarios.map(s => {
+          const r = calcPKVScenario({
+            kv:s.kv, kt:s.kt, pv:s.pv, ark:s.ark, pzt:s.pzt, kids:s.kids,
+            agzPercentKV, agzPercentKT, agzCapKV, agzPercentPV, agzCapPV, isSachsen,
+            mtr, sbYear:sbYear, breYear:breYear, includeKidsPV
+          });
+          return {...r, id:s.id, name:s.name};
+        });
+      }, [scenarios, agzPercentKV, agzPercentKT, agzCapKV, agzPercentPV, agzCapPV, isSachsen, mtr, sbYear, breYear, includeKidsPV]);
+
+      const selected = results.find(r=>r.id===selectedId) || results[0];
+
+      function resetAll(){
+        setScenarios([emptyScenario("Szenario A")]);
+        setSelectedId(null);
+        setAgzPercentKV(50); setAgzPercentKT(50); setAgzCapKV(496.97);
+        setAgzPercentPV(50); setAgzCapPV(104.63); setIsSachsen(false);
+        setMTR(30); setSBYear(0); setBREYear(0); setIncludeKidsPV(true);
+        setGkvZusatz(2.5); setIsKinderlos(false);
+      }
+
+      return (
+        <div className="min-h-screen p-6">
+          <div className="max-w-7xl mx-auto grid gap-6">
+
+            <div className="header flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                {logoUrl ? <img src={logoUrl} alt="Logo" className="logo" /> :
+                  <div className="brandname text-xl" style={{color:'#111827'}}>{brandName}</div>}
+                <div className="hidden md:block text-sm text-slate-600" style={{borderLeft:"4px solid var(--brand)", paddingLeft:".6rem"}}>PKV Multi-Szenario · GKV-Vergleich</div>
+              </div>
+              <div className="flex gap-2">
+                <button className="btn btn-primary" onClick={()=>exportPDF('#resultsSection')}>PDF Export</button>
+                <button className="btn" onClick={resetAll}>Reset</button>
+              </div>
+            </div>
+
+            <div className="grid lg:grid-cols-2 gap-6">
+              <div className="card">
+                <div className="flex items-center justify-between mb-2">
+                  <h2 className="text-lg font-semibold">PKV-Szenarien</h2>
+                  <div className="flex gap-2">
+                    <button className="btn btn-primary" onClick={addScenario}>Szenario hinzufügen</button>
+                  </div>
+                </div>
+
+                <div className="grid gap-3">
+                  {scenarios.map((s)=>(
+                    <div className="scenario-card" key={s.id}>
+                      <div className="flex items-center justify-between gap-3">
+                        <input className="text-base font-semibold border rounded-md px-2 py-1 w-full"
+                          value={s.name} onChange={e=>updateScenario(s.id,{name:e.target.value})}/>
+                        <div className="flex gap-2 scenario-actions">
+                          <button className="btn" onClick={()=>duplicateScenario(s.id)}>Duplizieren</button>
+                          <button className="btn" onClick={()=>removeScenario(s.id)} disabled={scenarios.length<=1}>Entfernen</button>
+                          <button className="btn" onClick={()=>setSelectedId(s.id)} title="Für Detailanalyse auswählen">Auswählen</button>
+                        </div>
+                      </div>
+
+                      <div className="grid md:grid-cols-2 gap-3 mt-3">
+                        <NumberInput label="KV (ohne KT)" value={s.kv} onChange={v=>updateScenario(s.id,{kv:v})} suffix="€"/>
+                        <NumberInput label="KT (nicht absetzbar)" value={s.kt} onChange={v=>updateScenario(s.id,{kt:v})} suffix="€"/>
+                        <NumberInput label="PV (Pflicht)" value={s.pv} onChange={v=>updateScenario(s.id,{pv:v})} suffix="€"/>
+                        <NumberInput label="ARK (nicht absetzbar)" value={s.ark} onChange={v=>updateScenario(s.id,{ark:v})} suffix="€"/>
+                        <NumberInput label="PZT (nicht absetzbar)" value={s.pzt} onChange={v=>updateScenario(s.id,{pzt:v})} suffix="€"/>
+                      </div>
+
+                      <div className="mt-2">
+                        <div className="flex items-center justify-between">
+                          <h4 className="font-semibold text-sm">Kinder (optional)</h4>
+                          <button className="btn" onClick={()=>addKidToScenario(s.id)}>Kind hinzufügen</button>
+                        </div>
+                        {s.kids.length>0 && (
+                          <div className="grid gap-2 mt-2">
+                            {s.kids.map((k)=> (
+                              <div key={k.id} className="grid grid-cols-12 gap-2 items-end">
+                                <div className="col-span-5"><NumberInput label="KV Kind" value={k.kv} onChange={v=>setKidValue(s.id,k.id,"kv",v)} suffix="€"/></div>
+                                <div className="col-span-5"><NumberInput label="PV Kind" value={k.pv} onChange={v=>setKidValue(s.id,k.id,"pv",v)} suffix="€"/></div>
+                                <div className="col-span-2 flex justify-end pb-2">
+                                  <button className="btn" onClick={()=>removeKidFromScenario(s.id,k.id)}>Entfernen</button>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="grid gap-6">
+                <div className="card" id="resultsSection">
+                  <div className="flex items-center justify-between">
+                    <h2 className="text-lg font-semibold">Detailanalyse</h2>
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm text-slate-600">Szenario:</span>
+                      <select className="border rounded-md px-2 py-1"
+                        value={selected?.id||""}
+                        onChange={e=>setSelectedId(e.target.value)}>
+                        {scenarios.map(s=>(<option key={s.id} value={s.id}>{s.name}</option>))}
+                      </select>
+                    </div>
+                  </div>
+
+                  {selected ? (
+                    <div className="grid md:grid-cols-2 gap-6 mt-3">
+                      <div>
+                        <h3 className="font-semibold mb-2">PKV – Netto (nach Steuer)</h3>
+                        <div className="grid gap-2 text-sm">
+                          <Row label="Voller Beitrag (ohne AGZ, ohne SB/BRE)" value={selected.fullGrossPremium}/>
+                          <div className="divider"></div>
+                          <Row label="AG-Zuschuss KV (Haupt, inkl. KT)" value={selected.agzKV_main}/>
+                          <Row label="└─ davon KV" value={selected.grantKV}/>
+                          <Row label="└─ davon KT" value={selected.grantKT}/>
+                          <Row label="AG-Zuschuss KV (Kinder)" value={selected.agzKV_kids}/>
+                          <Row label="AG-Zuschuss PV (Haupt)" value={selected.agzPV_main}/>
+                          <Row label="AG-Zuschuss PV (Kinder)" value={selected.agzPV_kids}/>
+                          <Row label="AG-Zuschuss gesamt" value={selected.agzTotal} />
+                          <div className="divider"></div>
+                          <Row label="Regulärer Beitrag nach AGZ (ohne SB/BRE)" value={selected.regularAfterAGZ}/>
+                          <Row label="Eigenanteil vor Steuer (inkl. SB/BRE)" value={selected.cashOutBeforeTax}/>
+                          <Row label="Steuerlich absetzbare Basis" value={selected.deductibleBase}/>
+                          <Row label="Steuerersparnis (geschätzt)" value={selected.taxSaving}/>
+                          <div className="divider"></div>
+                          <Row label="PKV – Effektiv nach Steuern" value={selected.effectiveAfterTax} big/>
+                        </div>
+                      </div>
+
+                      <div>
+                        <h3 className="font-semibold mb-2">GKV – Netto (AN-Anteil nach Steuer)</h3>
+                        <div className="grid gap-2 text-sm">
+                          <Row label="KV (AN) bei Höchstbeitrag" value={gkvAN_KV}/>
+                          <Row label={`PV (AN) ${isSachsen? '(Sachsen)': '(Bund)'} ${isKinderlos? '+ kinderlos':''}`} value={gkvAN_PV}/>
+                          <Row label="GKV – AN-Beitrag gesamt (brutto)" value={gkvAN_total}/>
+                          <Row label="Steuerersparnis (geschätzt)" value={gkv_taxSaving}/>
+                          <div className="divider"></div>
+                          <Row label="GKV – Netto (nach Steuern)" value={gkv_afterTax} big/>
+                        </div>
+
+                        <div className="mt-4 p-3 rounded-xl border flex items-center justify-between" style="border-color:var(--brand)">
+                          <div>
+                            <div className="text-sm text-slate-600">Beitragsunterschied (GKV Netto – PKV Netto)</div>
+                            <div className="text-xl font-semibold">
+                              {currency(clamp2(gkv_afterTax - selected.effectiveAfterTax))}
+                            </div>
+                          </div>
+                          <div className={"pill " + ( (gkv_afterTax - selected.effectiveAfterTax) > 0 ? "bg-green-100 text-green-700 border border-green-200" : "bg-red-100 text-red-700 border border-red-200") }>
+                            { (gkv_afterTax - selected.effectiveAfterTax) > 0 ? "PKV spart gegenüber GKV" : "GKV günstiger als PKV" }
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="text-sm text-slate-600 mt-2">Bitte ein Szenario für die Detailanalyse auswählen.</div>
+                  )}
+                </div>
+
+                <div className="card">
+                  <h2 className="text-lg font-semibold mb-2">Vergleich aller PKV-Szenarien</h2>
+                  <div className="overflow-auto rounded-lg border">
+                    <table>
+                      <thead style="background:#f1f5f9">
+                        <tr>
+                          <th>Szenario</th>
+                          <th>PKV Netto</th>
+                          <th>GKV Netto</th>
+                          <th>Diff (GKV−PKV)</th>
+                          <th>AGZ gesamt</th>
+                          <th>Steuerersparnis</th>
+                          <th>Regulär n. AGZ</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {results.map(r=>{
+                          const diff = clamp2(gkv_afterTax - r.effectiveAfterTax);
+                          const isSelected = selected && r.id===selected.id;
+                          return (
+                            <tr key={r.id} className={isSelected? "bg-yellow-50": ""}>
+                              <td style={{textAlign:"left"}}>{r.name}</td>
+                              <td>{currency(r.effectiveAfterTax)}</td>
+                              <td>{currency(gkv_afterTax)}</td>
+                              <td style={{color: diff>0? "#15803d":"#b91c1c"}}>{currency(diff)}</td>
+                              <td>{currency(r.agzTotal)}</td>
+                              <td>{currency(r.taxSaving)}</td>
+                              <td>{currency(r.regularAfterAGZ)}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="card">
+              <h2 className="text-lg font-semibold mb-2">Branding</h2>
+              <div className="grid md:grid-cols-3 gap-3">
+                <NumberInput type="text" label="Brandname (Fallback)" value={brandName} onChange={setBrandName} />
+                <NumberInput type="text" label="Logo-URL (PNG/SVG, mit CORS)" value={logoUrl} onChange={setLogoUrl} />
+                <div className="help">Tipp: Logo als Direktlink einfügen (z. B. GitHub Raw). Einträge werden lokal gespeichert.</div>
+              </div>
+            </div>
+
+            <div className="grid md:grid-cols-2 gap-6">
+              <div className="card">
+                <h2 className="text-lg font-semibold mb-2">Global – Arbeitgeberzuschuss (AGZ)</h2>
+                <div className="grid gap-3">
+                  <div className="grid-3">
+                    <NumberInput label="AGZ % KV" value={agzPercentKV} onChange={setAgzPercentKV} suffix="%"/>
+                    <NumberInput label="AGZ-Cap KV/Monat (2026)" value={agzCapKV} onChange={setAgzCapKV} suffix="€"/>
+                    <div className="help">KV-Cap gilt auch für KT (gemeinsamer Topf)</div>
+                  </div>
+                  <div className="grid-3">
+                    <NumberInput label="AGZ % KT" value={agzPercentKT} onChange={setAgzPercentKT} suffix="%"/>
+                    <div></div><div className="help">KT ist förderfähig, aber nicht steuerlich absetzbar</div>
+                  </div>
+                  <div className="grid-3">
+                    <NumberInput label="AGZ % PV" value={agzPercentPV} onChange={setAgzPercentPV} suffix="%"/>
+                    <NumberInput label={`AGZ-Cap PV/Monat ${isSachsen? '(Sachsen)': '(2026 Bund)'}`} value={isSachsen? 75.56 : agzCapPV} onChange={setAgzCapPV} suffix="€"/>
+                    <label className="flex items-center gap-2 text-xs text-slate-600 mt-6">
+                      <input type="checkbox" checked={isSachsen} onChange={e=>setIsSachsen(e.target.checked)}/> Sachsen
+                    </label>
+                  </div>
+                </div>
+              </div>
+
+              <div className="card">
+                <h2 className="text-lg font-semibold mb-2">Global – Steuer & GKV-Basis</h2>
+                <div className="grid gap-3">
+                  <NumberInput label="Grenzsteuersatz (MTR)" value={mtr} onChange={setMTR} suffix="%"/>
+                  <NumberInput label="Selbstbeteiligung (jährlich, netto)" value={sbYear} onChange={setSBYear} suffix="€"/>
+                  <NumberInput label="Beitragsrückerstattung (jährlich)" value={breYear} onChange={setBREYear} suffix="€"/>
+                  <label className="flex items-center gap-2 text-xs text-slate-600">
+                    <input type="checkbox" checked={includeKidsPV} onChange={e=>setIncludeKidsPV(e.target.checked)}/> Kinder-PV in Steuerbasis berücksichtigen
+                  </label>
+                  <div className="divider"></div>
+                  <NumberInput label="GKV Zusatzbeitrag" value={gkvZusatz} onChange={setGkvZusatz} suffix="%"/>
+                  <label className="flex items-center gap-2 text-sm">
+                    <input type="checkbox" checked={isKinderlos} onChange={e=>setIsKinderlos(e.target.checked)}/> Kinderlos (PV-Zuschlag AN)
+                  </label>
+                  <div className="help">GKV (AN) bei Höchstbeitrag: KV=(14,6% + Zusatz)/2 · PV Bund 1,7% | Sachsen 2,2% + Kinderlos 0,6%.</div>
+                </div>
+              </div>
+            </div>
+
+            <div className="text-xs text-slate-600">
+              <p>⚠️ Vereinfachtes Modell. Keine Steuer-/Rechtsberatung. Caps/Jahreswerte und Beitragssätze jährlich prüfen. BBG 2026: 5.812,50 €/Monat.</p>
+            </div>
+
+          </div>
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App/>);
+  </script>
+</body>
+</html>
