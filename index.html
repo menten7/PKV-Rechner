@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>PKV Multi-Szenario · GKV-Vergleich (v6)</title>
+  <title>PKV Multi-Szenario · GKV-Vergleich (v6-fix)</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
@@ -47,7 +47,6 @@
     const clamp2 = x => Math.round((x + Number.EPSILON) * 100) / 100;
     const currency = x => (x||0).toLocaleString(undefined,{minimumFractionDigits:2, maximumFractionDigits:2})+" €";
 
-    // 2026 Konstanten
     const BBG_MO = 5812.50;
     const GKV_RATE = 14.6;
     const PV_CHILDLESS_SURCHARGE = 0.6;
@@ -67,7 +66,7 @@
 
     function Row({label, value, strong, big}){
       return (
-        <div className={"row " + (big? "big": "")}>
+        <div className={"row " + (big? "big": "")}> 
           <span className="text-slate-600">{label}</span>
           <span className={strong? "font-semibold": ""}>{currency(value)}</span>
         </div>
@@ -177,7 +176,6 @@
     }
 
     function App(){
-      // Branding
       const [brandName, setBrandName] = useState("Deine Marke");
       const [logoUrl, setLogoUrl] = useState("");
       useEffect(()=>{
@@ -188,7 +186,6 @@
         localStorage.setItem("pkv_branding", JSON.stringify({brandName, logoUrl}));
       }, [brandName, logoUrl]);
 
-      // Global: AGZ + Steuer + GKV
       const [agzPercentKV, setAgzPercentKV] = useState(50);
       const [agzPercentKT, setAgzPercentKT] = useState(50);
       const [agzCapKV, setAgzCapKV] = useState(496.97);
@@ -204,7 +201,6 @@
       const [gkvZusatz, setGkvZusatz] = useState(2.5);
       const [isKinderlos, setIsKinderlos] = useState(false);
 
-      // GKV baseline
       const gkvAN_KV = useMemo(()=>{
         const rate = (GKV_RATE + (gkvZusatz||0)) / 2;
         return clamp2(BBG_MO * (rate/100));
@@ -218,7 +214,6 @@
       const gkv_taxSaving = clamp2(gkvAN_total * (mtr/100));
       const gkv_afterTax = clamp2(gkvAN_total - gkv_taxSaving);
 
-      // Scenarios
       const emptyScenario = (name="Szenario A") => ({
         id: Math.random().toString(36).slice(2),
         name,
@@ -411,7 +406,7 @@
                           <Row label="GKV – Netto (nach Steuern)" value={gkv_afterTax} big/>
                         </div>
 
-                        <div className="mt-4 p-3 rounded-xl border flex items-center justify-between" style="border-color:var(--brand)">
+                        <div className="mt-4 p-3 rounded-xl border flex items-center justify-between" style={{borderColor:"var(--brand)"}}>
                           <div>
                             <div className="text-sm text-slate-600">Beitragsunterschied (GKV Netto – PKV Netto)</div>
                             <div className="text-xl font-semibold">
@@ -433,7 +428,7 @@
                   <h2 className="text-lg font-semibold mb-2">Vergleich aller PKV-Szenarien</h2>
                   <div className="overflow-auto rounded-lg border">
                     <table>
-                      <thead style="background:#f1f5f9">
+                      <thead style={{background:'#f1f5f9'}}>
                         <tr>
                           <th>Szenario</th>
                           <th>PKV Netto</th>
